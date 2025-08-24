@@ -59,42 +59,21 @@ jobs:
           python-version: "3.x"
 
       - name: Install Bandit + SARIF formatter
-        run: |
-          pip install bandit bandit-sarif-formatter
+        run: pip install bandit bandit-sarif-formatter
 
       - name: Run Bandit (JSON + fail on HIGH)
         run: |
           bandit -r . -f json -o bandit.json || true
-          python - <<'PY'
-import json, sys
-j=json.load(open("bandit.json"))
-high=sum(1 for r in j.get("results",[]) if r.get("issue_severity","").upper()=="HIGH")
-print(f"Bandit HIGH findings: {high}")
-sys.exit(1 if high>0 else 0)
-PY
+          python -c "import json,sys; j=json.load(open('bandit.json')); high=sum(1 for r in j.get('results',[]) if r.get('issue_severity','').upper()=='HIGH'); print(f'Bandit HIGH findings: {high}'); sys.exit(1 if high>0 else 0)"
 
       - name: Convert Bandit -> SARIF
         run: bandit-sarif-formatter -i bandit.json -o bandit.sarif
 
-      - name: Upload SARIF to GitHub Security
+      - name: Upload SARIF
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: bandit.sarif
           category: bandit
-
-      - name: Import to DefectDojo (optional, SARIF)
-        if: ${{ secrets.DD_URL != '' && secrets.DD_API_KEY != '' && secrets.DD_ENGAGEMENT_ID != '' }}
-        env:
-          DD_URL: ${{ secrets.DD_URL }}
-          DD_API_KEY: ${{ secrets.DD_API_KEY }}
-          DD_ENGAGEMENT_ID: ${{ secrets.DD_ENGAGEMENT_ID }}
-        run: |
-          curl -sS -X POST "$DD_URL/api/v2/import-scan/" \
-            -H "Authorization: Token $DD_API_KEY" \
-            -F "engagement=$DD_ENGAGEMENT_ID" \
-            -F "scan_type=SARIF" \
-            -F "file=@bandit.sarif" \
-            -F "active=True" -F "verified=False" -f -o /dev/null
 
   trivy-fs:
     name: Trivy FS (deps/misconfig/secrets)
