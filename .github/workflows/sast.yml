@@ -19,15 +19,118 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run Semgrep
-        uses: returntocorp/semgrep-action@v1
-        with:
-          config: p/ci
-          generateSarif: true
-          sarif_dir: reports
+      - name: Install Semgrep
+        run: pip install semgrep
+
+      - name: Run Semgrep and generate SARIF
+        # p/ci — хороший стартовый ruleset; не валим сборку, чтобы увидеть алерты
+        run: semgrep --config p/ci --sarif --output semgrep.sarif || true
 
       - name: Upload SARIF to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: reports/semgrep.sarif
+          sarif_file: semgrep.sarif
           category: semgrep
+
+      - name: Import to DefectDojo (optional, SARIF)
+        if: ${{ secrets.DD_URL != '' && secrets.DD_API_KEY != '' && secrets.DD_ENGAGEMENT_ID != '' }}
+        env:
+          DD_URL: ${{ secrets.DD_URL }}
+          DD_API_KEY: ${{ secrets.DD_API_KEY }}
+          DD_ENGAGEMENT_ID: ${{ secrets.DD_ENGAGEMENT_ID }}
+        run: |
+          curl -sS -X POST "$DD_URL/api/v2/import-scan/" \
+            -H "Authorization: Token $DD_API_KEY" \
+            -F "engagement=$DD_ENGAGEMENT_ID" \
+            -F "scan_type=SARIF" \
+            -F "file=@semgrep.sarif" \
+            -F "active=True" -F "verified=False" -f -o /dev/null
+
+  bandit:
+    name: Bandit (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install Bandit + SARIF formatter
+        run: |
+          pip install bandit bandit-sarif-formatter
+
+      - name: Run Bandit (JSON + fail on HIGH)
+        run: |
+          bandit -r . -f json -o bandit.json || true
+          python - <<'PY'
+import json, sys
+j=json.load(open("bandit.json"))
+high=sum(1 for r in j.get("results",[]) if r.get("issue_severity","").upper()=="HIGH")
+print(f"Bandit HIGH findings: {high}")
+sys.exit(1 if high>0 else 0)
+PY
+
+      - name: Convert Bandit -> SARIF
+        run: bandit-sarif-formatter -i bandit.json -o bandit.sarif
+
+      - name: Upload SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: bandit.sarif
+          category: bandit
+
+      - name: Import to DefectDojo (optional, SARIF)
+        if: ${{ secrets.DD_URL != '' && secrets.DD_API_KEY != '' && secrets.DD_ENGAGEMENT_ID != '' }}
+        env:
+          DD_URL: ${{ secrets.DD_URL }}
+          DD_API_KEY: ${{ secrets.DD_API_KEY }}
+          DD_ENGAGEMENT_ID: ${{ secrets.DD_ENGAGEMENT_ID }}
+        run: |
+          curl -sS -X POST "$DD_URL/api/v2/import-scan/" \
+            -H "Authorization: Token $DD_API_KEY" \
+            -F "engagement=$DD_ENGAGEMENT_ID" \
+            -F "scan_type=SARIF" \
+            -F "file=@bandit.sarif" \
+            -F "active=True" -F "verified=False" -f -o /dev/null
+
+  trivy-fs:
+    name: Trivy FS (deps/misconfig/secrets)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Trivy FS → SARIF (fail on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-fs.sarif
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+
+      - name: Upload SARIF to GitHub Security
+        if: always()   # загружаем даже если прошлый шаг упал по exit-code
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+      - name: Import to DefectDojo (optional, SARIF)
+        if: ${{ always() && secrets.DD_URL != '' && secrets.DD_API_KEY != '' && secrets.DD_ENGAGEMENT_ID != '' }}
+        env:
+          DD_URL: ${{ secrets.DD_URL }}
+          DD_API_KEY: ${{ secrets.DD_API_KEY }}
+          DD_ENGAGEMENT_ID: ${{ secrets.DD_ENGAGEMENT_ID }}
+        run: |
+          test -f trivy-fs.sarif && curl -sS -X POST "$DD_URL/api/v2/import-scan/" \
+            -H "Authorization: Token $DD_API_KEY" \
+            -F "engagement=$DD_ENGAGEMENT_ID" \
+            -F "scan_type=SARIF" \
+            -F "file=@trivy-fs.sarif" \
+            -F "active=True" -F "verified=False" -f -o /dev/null || true
