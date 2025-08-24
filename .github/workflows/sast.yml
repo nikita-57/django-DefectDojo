@@ -15,6 +15,10 @@ jobs:
   semgrep:
     name: Semgrep
     runs-on: ubuntu-latest
+    env:
+      DD_URL: ${{ secrets.DD_URL }}
+      DD_API_KEY: ${{ secrets.DD_API_KEY }}
+      DD_ENGAGEMENT_ID: ${{ secrets.DD_ENGAGEMENT_ID }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -23,7 +27,6 @@ jobs:
         run: pip install semgrep
 
       - name: Run Semgrep and generate SARIF
-        # p/ci — хороший стартовый ruleset; не валим сборку, чтобы увидеть алерты
         run: semgrep --config p/ci --sarif --output semgrep.sarif || true
 
       - name: Upload SARIF to GitHub Security
@@ -33,11 +36,7 @@ jobs:
           category: semgrep
 
       - name: Import to DefectDojo (optional, SARIF)
-        if: ${{ secrets.DD_URL != '' && secrets.DD_API_KEY != '' && secrets.DD_ENGAGEMENT_ID != '' }}
-        env:
-          DD_URL: ${{ secrets.DD_URL }}
-          DD_API_KEY: ${{ secrets.DD_API_KEY }}
-          DD_ENGAGEMENT_ID: ${{ secrets.DD_ENGAGEMENT_ID }}
+        if: ${{ env.DD_URL != '' && env.DD_API_KEY != '' && env.DD_ENGAGEMENT_ID != '' }}
         run: |
           curl -sS -X POST "$DD_URL/api/v2/import-scan/" \
             -H "Authorization: Token $DD_API_KEY" \
@@ -78,6 +77,10 @@ jobs:
   trivy-fs:
     name: Trivy FS (deps/misconfig/secrets)
     runs-on: ubuntu-latest
+    env:
+      DD_URL: ${{ secrets.DD_URL }}
+      DD_API_KEY: ${{ secrets.DD_API_KEY }}
+      DD_ENGAGEMENT_ID: ${{ secrets.DD_ENGAGEMENT_ID }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -94,18 +97,14 @@ jobs:
           exit-code: '1'
 
       - name: Upload SARIF to GitHub Security
-        if: always()   # загружаем даже если прошлый шаг упал по exit-code
+        if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
 
       - name: Import to DefectDojo (optional, SARIF)
-        if: ${{ always() && secrets.DD_URL != '' && secrets.DD_API_KEY != '' && secrets.DD_ENGAGEMENT_ID != '' }}
-        env:
-          DD_URL: ${{ secrets.DD_URL }}
-          DD_API_KEY: ${{ secrets.DD_API_KEY }}
-          DD_ENGAGEMENT_ID: ${{ secrets.DD_ENGAGEMENT_ID }}
+        if: ${{ always() && env.DD_URL != '' && env.DD_API_KEY != '' && env.DD_ENGAGEMENT_ID != '' }}
         run: |
           test -f trivy-fs.sarif && curl -sS -X POST "$DD_URL/api/v2/import-scan/" \
             -H "Authorization: Token $DD_API_KEY" \
