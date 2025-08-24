@@ -9,7 +9,7 @@ on:
 
 permissions:
   contents: read
-  security-events: write
+  security-events: write   # для загрузки SARIF в Security → Code scanning
 
 jobs:
   semgrep:
@@ -26,7 +26,7 @@ jobs:
       - name: Install Semgrep
         run: pip install semgrep
 
-      - name: Run Semgrep and generate SARIF
+      - name: Run Semgrep → SARIF
         run: semgrep --config p/ci --sarif --output semgrep.sarif || true
 
       - name: Upload SARIF to GitHub Security
@@ -35,14 +35,20 @@ jobs:
           sarif_file: semgrep.sarif
           category: semgrep
 
-      - name: Import to DefectDojo (optional, SARIF)
+      # Чтобы не плодить тесты в Dojo — используем reimport и добавляем метаданные билда
+      - name: Reimport Semgrep to DefectDojo (optional)
         if: ${{ env.DD_URL != '' && env.DD_API_KEY != '' && env.DD_ENGAGEMENT_ID != '' }}
         run: |
-          curl -sS -X POST "$DD_URL/api/v2/import-scan/" \
+          curl -sS -X POST "$DD_URL/api/v2/reimport-scan/" \
             -H "Authorization: Token $DD_API_KEY" \
             -F "engagement=$DD_ENGAGEMENT_ID" \
             -F "scan_type=SARIF" \
             -F "file=@semgrep.sarif" \
+            -F "test_title=Semgrep OSS Scan (SARIF)" \
+            -F "build_id=$GITHUB_RUN_NUMBER" \
+            -F "commit_hash=$GITHUB_SHA" \
+            -F "branch_tag=$GITHUB_REF_NAME" \
+            -F "close_old_findings=True" \
             -F "active=True" -F "verified=False" -f -o /dev/null
 
   bandit:
@@ -69,30 +75,21 @@ jobs:
           bandit -r . -f json -o bandit.json || true
           python -c "import json,sys; j=json.load(open('bandit.json')); high=sum(1 for r in j.get('results',[]) if r.get('issue_severity','').upper()=='HIGH'); print(f'Bandit HIGH findings: {high}'); sys.exit(1 if high>0 else 0)"
 
-      - name: Convert Bandit JSON -> SARIF
-        if: always()
-        uses: advanced-security/convert-burpsuite-sarif@v1
-        with:
-          input: bandit.json
-          format: bandit
-          output: bandit.sarif
-
-      - name: Upload SARIF to GitHub Security
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: bandit.sarif
-          category: bandit
-
-      - name: Import to DefectDojo (optional, SARIF)
-        if: ${{ always() && env.DD_URL != '' && env.DD_API_KEY != '' && env.DD_ENGAGEMENT_ID != '' }}
+      # Грузим нативный JSON Bandit в DefectDojo (тип скана: Bandit Scan)
+      - name: Reimport Bandit JSON to DefectDojo (optional)
+        if: ${{ env.DD_URL != '' && env.DD_API_KEY != '' && env.DD_ENGAGEMENT_ID != '' }}
         run: |
-          test -f bandit.sarif && curl -sS -X POST "$DD_URL/api/v2/import-scan/" \
+          curl -sS -X POST "$DD_URL/api/v2/reimport-scan/" \
             -H "Authorization: Token $DD_API_KEY" \
             -F "engagement=$DD_ENGAGEMENT_ID" \
-            -F "scan_type=SARIF" \
-            -F "file=@bandit.sarif" \
-            -F "active=True" -F "verified=False" -f -o /dev/null || true
+            -F "scan_type=Bandit Scan" \
+            -F "file=@bandit.json" \
+            -F "test_title=Bandit Scan" \
+            -F "build_id=$GITHUB_RUN_NUMBER" \
+            -F "commit_hash=$GITHUB_SHA" \
+            -F "branch_tag=$GITHUB_REF_NAME" \
+            -F "close_old_findings=True" \
+            -F "active=True" -F "verified=False" -f -o /dev/null
 
   trivy-fs:
     name: Trivy FS (deps/misconfig/secrets)
@@ -114,7 +111,7 @@ jobs:
           output: trivy-fs.sarif
           ignore-unfixed: true
           severity: HIGH,CRITICAL
-          exit-code: '1'
+          exit-code: '1'   # job будет красным при HIGH/CRITICAL — так и задумано
 
       - name: Upload SARIF to GitHub Security
         if: always()
@@ -123,12 +120,17 @@ jobs:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
 
-      - name: Import to DefectDojo (optional, SARIF)
+      - name: Reimport Trivy to DefectDojo (optional)
         if: ${{ always() && env.DD_URL != '' && env.DD_API_KEY != '' && env.DD_ENGAGEMENT_ID != '' }}
         run: |
-          test -f trivy-fs.sarif && curl -sS -X POST "$DD_URL/api/v2/import-scan/" \
+          test -f trivy-fs.sarif && curl -sS -X POST "$DD_URL/api/v2/reimport-scan/" \
             -H "Authorization: Token $DD_API_KEY" \
             -F "engagement=$DD_ENGAGEMENT_ID" \
             -F "scan_type=SARIF" \
             -F "file=@trivy-fs.sarif" \
+            -F "test_title=Trivy Scan (SARIF)" \
+            -F "build_id=$GITHUB_RUN_NUMBER" \
+            -F "commit_hash=$GITHUB_SHA" \
+            -F "branch_tag=$GITHUB_REF_NAME" \
+            -F "close_old_findings=True" \
             -F "active=True" -F "verified=False" -f -o /dev/null || true
