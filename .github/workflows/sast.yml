@@ -9,7 +9,7 @@ on:
 
 permissions:
   contents: read
-  security-events: write   # для загрузки SARIF в Security → Code scanning
+  security-events: write
 
 jobs:
   semgrep:
@@ -35,10 +35,10 @@ jobs:
           sarif_file: semgrep.sarif
           category: semgrep
 
-      # Чтобы не плодить тесты в Dojo — используем reimport и добавляем метаданные билда
-      - name: Reimport Semgrep to DefectDojo (optional)
+      - name: Reimport/Import Semgrep to DefectDojo (optional)
         if: ${{ env.DD_URL != '' && env.DD_API_KEY != '' && env.DD_ENGAGEMENT_ID != '' }}
         run: |
+          set -e
           curl -sS -X POST "$DD_URL/api/v2/reimport-scan/" \
             -H "Authorization: Token $DD_API_KEY" \
             -F "engagement=$DD_ENGAGEMENT_ID" \
@@ -49,7 +49,16 @@ jobs:
             -F "commit_hash=$GITHUB_SHA" \
             -F "branch_tag=$GITHUB_REF_NAME" \
             -F "close_old_findings=True" \
-            -F "active=True" -F "verified=False" -f -o /dev/null
+          || curl -sS -X POST "$DD_URL/api/v2/import-scan/" \
+            -H "Authorization: Token $DD_API_KEY" \
+            -F "engagement=$DD_ENGAGEMENT_ID" \
+            -F "scan_type=SARIF" \
+            -F "file=@semgrep.sarif" \
+            -F "test_title=Semgrep OSS Scan (SARIF)" \
+            -F "build_id=$GITHUB_RUN_NUMBER" \
+            -F "commit_hash=$GITHUB_SHA" \
+            -F "branch_tag=$GITHUB_REF_NAME" \
+            -F "active=True" -F "verified=False"
 
   bandit:
     name: Bandit (Python)
@@ -73,12 +82,25 @@ jobs:
       - name: Run Bandit (JSON + fail on HIGH)
         run: |
           bandit -r . -f json -o bandit.json || true
-          python -c "import json,sys; j=json.load(open('bandit.json')); high=sum(1 for r in j.get('results',[]) if r.get('issue_severity','').upper()=='HIGH'); print(f'Bandit HIGH findings: {high}'); sys.exit(1 if high>0 else 0)"
+          python - <<'PY'
+          import json, sys
+          with open("bandit.json") as f:
+              data = json.load(f)
+          high = sum(1 for r in data.get("results", []) if r.get("issue_severity","").upper()=="HIGH")
+          print(f"Bandit HIGH findings: {high}")
+          sys.exit(1 if high > 0 else 0)
+          PY
 
-      # Грузим нативный JSON Bandit в DefectDojo (тип скана: Bandit Scan)
-      - name: Reimport Bandit JSON to DefectDojo (optional)
+      - name: Upload Bandit JSON to GitHub Security (as SARIF via converter)
+        uses: advanced-security/convert-burp-suite-sarif@v1
+        with:
+          input: bandit.json
+          output: bandit.sarif
+
+      - name: Reimport/Import Bandit JSON to DefectDojo (optional)
         if: ${{ env.DD_URL != '' && env.DD_API_KEY != '' && env.DD_ENGAGEMENT_ID != '' }}
         run: |
+          set -e
           curl -sS -X POST "$DD_URL/api/v2/reimport-scan/" \
             -H "Authorization: Token $DD_API_KEY" \
             -F "engagement=$DD_ENGAGEMENT_ID" \
@@ -89,7 +111,16 @@ jobs:
             -F "commit_hash=$GITHUB_SHA" \
             -F "branch_tag=$GITHUB_REF_NAME" \
             -F "close_old_findings=True" \
-            -F "active=True" -F "verified=False" -f -o /dev/null
+          || curl -sS -X POST "$DD_URL/api/v2/import-scan/" \
+            -H "Authorization: Token $DD_API_KEY" \
+            -F "engagement=$DD_ENGAGEMENT_ID" \
+            -F "scan_type=Bandit Scan" \
+            -F "file=@bandit.json" \
+            -F "test_title=Bandit Scan" \
+            -F "build_id=$GITHUB_RUN_NUMBER" \
+            -F "commit_hash=$GITHUB_SHA" \
+            -F "branch_tag=$GITHUB_REF_NAME" \
+            -F "active=True" -F "verified=False"
 
   trivy-fs:
     name: Trivy FS (deps/misconfig/secrets)
@@ -102,7 +133,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Trivy FS → SARIF (fail on HIGH/CRITICAL)
+      - name: Run Trivy FS → SARIF (fail on HIGH/CRITICAL)
         uses: aquasecurity/trivy-action@0.24.0
         with:
           scan-type: fs
@@ -111,7 +142,7 @@ jobs:
           output: trivy-fs.sarif
           ignore-unfixed: true
           severity: HIGH,CRITICAL
-          exit-code: '1'   # job будет красным при HIGH/CRITICAL — так и задумано
+          exit-code: '1'
 
       - name: Upload SARIF to GitHub Security
         if: always()
@@ -120,10 +151,12 @@ jobs:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
 
-      - name: Reimport Trivy to DefectDojo (optional)
+      - name: Reimport/Import Trivy to DefectDojo (optional)
         if: ${{ always() && env.DD_URL != '' && env.DD_API_KEY != '' && env.DD_ENGAGEMENT_ID != '' }}
         run: |
-          test -f trivy-fs.sarif && curl -sS -X POST "$DD_URL/api/v2/reimport-scan/" \
+          set -e
+          test -f trivy-fs.sarif || exit 0
+          curl -sS -X POST "$DD_URL/api/v2/reimport-scan/" \
             -H "Authorization: Token $DD_API_KEY" \
             -F "engagement=$DD_ENGAGEMENT_ID" \
             -F "scan_type=SARIF" \
@@ -133,4 +166,13 @@ jobs:
             -F "commit_hash=$GITHUB_SHA" \
             -F "branch_tag=$GITHUB_REF_NAME" \
             -F "close_old_findings=True" \
-            -F "active=True" -F "verified=False" -f -o /dev/null || true
+          || curl -sS -X POST "$DD_URL/api/v2/import-scan/" \
+            -H "Authorization: Token $DD_API_KEY" \
+            -F "engagement=$DD_ENGAGEMENT_ID" \
+            -F "scan_type=SARIF" \
+            -F "file=@trivy-fs.sarif" \
+            -F "test_title=Trivy Scan (SARIF)" \
+            -F "build_id=$GITHUB_RUN_NUMBER" \
+            -F "commit_hash=$GITHUB_SHA" \
+            -F "branch_tag=$GITHUB_REF_NAME" \
+            -F "active=True" -F "verified=False"
