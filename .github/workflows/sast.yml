@@ -1,0 +1,180 @@
+name: SAST
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  security-events: write   # для загрузки SARIF в Code Scanning
+  actions: read
+
+jobs:
+  semgrep:
+    name: Semgrep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Semgrep (ruleset: p/ci)
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: p/ci
+          generateSarif: true
+          sarif_dir: reports
+          # Блокируем билд, если есть правила уровня "error" из набора p/ci
+          auditOn: push
+
+      - name: Upload SARIF to GitHub Security (Semgrep)
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: reports/semgrep.sarif
+          category: semgrep
+
+      - name: Export Semgrep JSON for Dojo import
+        run: |
+          mkdir -p reports
+          semgrep --config p/ci --json --output reports/semgrep.json || true
+
+      - name: Import Semgrep to DefectDojo (optional)
+        if: ${{ secrets.DD_URL != '' && secrets.DD_API_KEY != '' && secrets.DD_PRODUCT_ID != '' && secrets.DD_ENGAGEMENT_ID != '' }}
+        env:
+          DD_URL: ${{ secrets.DD_URL }}
+          DD_API_KEY: ${{ secrets.DD_API_KEY }}
+          DD_PRODUCT_ID: ${{ secrets.DD_PRODUCT_ID }}
+          DD_ENGAGEMENT_ID: ${{ secrets.DD_ENGAGEMENT_ID }}
+        run: |
+          curl -sS -X POST "$DD_URL/api/v2/import-scan/" \
+            -H "Authorization: Token $DD_API_KEY" \
+            -F "engagement=$DD_ENGAGEMENT_ID" \
+            -F "scan_type=Semgrep JSON Report" \
+            -F "file=@reports/semgrep.json" \
+            -F "auto_create_context=True" \
+            -F "active=True" \
+            -F "verified=False" \
+            -F "close_old_findings=False" \
+            -f -o /dev/null
+
+  bandit:
+    name: Bandit (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install bandit
+        run: pip install bandit
+
+      - name: Run bandit (JSON + fail on HIGH)
+        run: |
+          mkdir -p reports
+          # полный отчёт в JSON
+          bandit -r . -f json -o reports/bandit.json || true
+          # порог отказа: если есть High — падаем
+          python - << 'PY'
+import json, sys
+j=json.load(open("reports/bandit.json"))
+high=sum(1 for i in j.get("results",[]) if i.get("issue_severity","").upper()=="HIGH")
+print(f"HIGH findings: {high}")
+sys.exit(1 if high>0 else 0)
+PY
+
+      - name: Convert Bandit JSON -> SARIF
+        uses: advanced-security/convert-burpsuite-sarif@v1
+        with:
+          input: reports/bandit.json
+          format: bandit
+          output: reports/bandit.sarif
+
+      - name: Upload SARIF to GitHub Security (Bandit)
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: reports/bandit.sarif
+          category: bandit
+
+      - name: Import Bandit to DefectDojo (optional)
+        if: ${{ secrets.DD_URL != '' && secrets.DD_API_KEY != '' && secrets.DD_PRODUCT_ID != '' && secrets.DD_ENGAGEMENT_ID != '' }}
+        env:
+          DD_URL: ${{ secrets.DD_URL }}
+          DD_API_KEY: ${{ secrets.DD_API_KEY }}
+          DD_ENGAGEMENT_ID: ${{ secrets.DD_ENGAGEMENT_ID }}
+        run: |
+          curl -sS -X POST "$DD_URL/api/v2/import-scan/" \
+            -H "Authorization: Token $DD_API_KEY" \
+            -F "engagement=$DD_ENGAGEMENT_ID" \
+            -F "scan_type=Bandit Scan" \
+            -F "file=@reports/bandit.json" \
+            -F "auto_create_context=True" \
+            -F "active=True" \
+            -F "verified=False" \
+            -F "close_old_findings=False" \
+            -f -o /dev/null
+
+  trivy-fs:
+    name: Trivy FS (коды/конфиги)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.2
+
+      - name: Run Trivy filesystem (JSON)
+        run: |
+          mkdir -p reports
+          trivy fs --scanners vuln,misconfig,secret --quiet --format json --output reports/trivy-fs.json .
+
+      - name: Fail on HIGH/CRITICAL (Trivy)
+        run: |
+          python - << 'PY'
+import json, sys
+j=json.load(open("reports/trivy-fs.json"))
+sev=lambda v: v.upper() in ("HIGH","CRITICAL")
+findings=0
+for r in j.get("Results",[]):
+  for v in r.get("Vulnerabilities",[]) or []:
+    if sev(v.get("Severity","")): findings+=1
+  for m in r.get("Misconfigurations",[]) or []:
+    if sev(m.get("Severity","")): findings+=1
+print("High/Critical findings:", findings)
+sys.exit(1 if findings>0 else 0)
+PY
+
+      - name: Convert Trivy JSON -> SARIF
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: reports/trivy-fs.sarif
+          ignore-unfixed: true
+          scanners: vuln,misconfig,secret
+        continue-on-error: true  # SARIF лишь для выгрузки
+
+      - name: Upload SARIF to GitHub Security (Trivy FS)
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: reports/trivy-fs.sarif
+          category: trivy-fs
+
+      - name: Import Trivy to DefectDojo (optional)
+        if: ${{ secrets.DD_URL != '' && secrets.DD_API_KEY != '' && secrets.DD_PRODUCT_ID != '' && secrets.DD_ENGAGEMENT_ID != '' }}
+        env:
+          DD_URL: ${{ secrets.DD_URL }}
+          DD_API_KEY: ${{ secrets.DD_API_KEY }}
+          DD_ENGAGEMENT_ID: ${{ secrets.DD_ENGAGEMENT_ID }}
+        run: |
+          curl -sS -X POST "$DD_URL/api/v2/import-scan/" \
+            -H "Authorization: Token $DD_API_KEY" \
+            -F "engagement=$DD_ENGAGEMENT_ID" \
+            -F "scan_type=Trivy JSON Report" \
+            -F "file=@reports/trivy-fs.json" \
+            -F "auto_create_context=True" \
+            -F "active=True" \
+            -F "verified=False" \
+            -F "close_old_findings=False" \
+            -f -o /dev/null
