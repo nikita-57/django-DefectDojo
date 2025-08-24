@@ -48,6 +48,10 @@ jobs:
   bandit:
     name: Bandit (Python)
     runs-on: ubuntu-latest
+    env:
+      DD_URL: ${{ secrets.DD_URL }}
+      DD_API_KEY: ${{ secrets.DD_API_KEY }}
+      DD_ENGAGEMENT_ID: ${{ secrets.DD_ENGAGEMENT_ID }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -66,13 +70,24 @@ jobs:
           python -c "import json,sys; j=json.load(open('bandit.json')); high=sum(1 for r in j.get('results',[]) if r.get('issue_severity','').upper()=='HIGH'); print(f'Bandit HIGH findings: {high}'); sys.exit(1 if high>0 else 0)"
 
       - name: Convert Bandit -> SARIF
-        run: bandit-sarif-formatter -i bandit.json -o bandit.sarif
+        run: python -m bandit_sarif_formatter -i bandit.json -o bandit.sarif
 
-      - name: Upload SARIF
+      - name: Upload SARIF to GitHub Security
+        if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: bandit.sarif
           category: bandit
+
+      - name: Import to DefectDojo (optional, SARIF)
+        if: ${{ env.DD_URL != '' && env.DD_API_KEY != '' && env.DD_ENGAGEMENT_ID != '' }}
+        run: |
+          curl -sS -X POST "$DD_URL/api/v2/import-scan/" \
+            -H "Authorization: Token $DD_API_KEY" \
+            -F "engagement=$DD_ENGAGEMENT_ID" \
+            -F "scan_type=SARIF" \
+            -F "file=@bandit.sarif" \
+            -F "active=True" -F "verified=False" -f -o /dev/null
 
   trivy-fs:
     name: Trivy FS (deps/misconfig/secrets)
