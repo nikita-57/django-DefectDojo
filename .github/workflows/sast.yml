@@ -61,16 +61,21 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: Install Bandit + SARIF formatter
-        run: pip install bandit bandit-sarif-formatter
+      - name: Install Bandit
+        run: pip install bandit
 
       - name: Run Bandit (JSON + fail on HIGH)
         run: |
           bandit -r . -f json -o bandit.json || true
           python -c "import json,sys; j=json.load(open('bandit.json')); high=sum(1 for r in j.get('results',[]) if r.get('issue_severity','').upper()=='HIGH'); print(f'Bandit HIGH findings: {high}'); sys.exit(1 if high>0 else 0)"
 
-      - name: Convert Bandit -> SARIF
-        run: python -m bandit_sarif_formatter -i bandit.json -o bandit.sarif
+      - name: Convert Bandit JSON -> SARIF
+        if: always()
+        uses: advanced-security/convert-burpsuite-sarif@v1
+        with:
+          input: bandit.json
+          format: bandit
+          output: bandit.sarif
 
       - name: Upload SARIF to GitHub Security
         if: always()
@@ -80,14 +85,14 @@ jobs:
           category: bandit
 
       - name: Import to DefectDojo (optional, SARIF)
-        if: ${{ env.DD_URL != '' && env.DD_API_KEY != '' && env.DD_ENGAGEMENT_ID != '' }}
+        if: ${{ always() && env.DD_URL != '' && env.DD_API_KEY != '' && env.DD_ENGAGEMENT_ID != '' }}
         run: |
-          curl -sS -X POST "$DD_URL/api/v2/import-scan/" \
+          test -f bandit.sarif && curl -sS -X POST "$DD_URL/api/v2/import-scan/" \
             -H "Authorization: Token $DD_API_KEY" \
             -F "engagement=$DD_ENGAGEMENT_ID" \
             -F "scan_type=SARIF" \
             -F "file=@bandit.sarif" \
-            -F "active=True" -F "verified=False" -f -o /dev/null
+            -F "active=True" -F "verified=False" -f -o /dev/null || true
 
   trivy-fs:
     name: Trivy FS (deps/misconfig/secrets)
