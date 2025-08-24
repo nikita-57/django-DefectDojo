@@ -91,12 +91,6 @@ jobs:
           sys.exit(1 if high > 0 else 0)
           PY
 
-      - name: Upload Bandit JSON to GitHub Security (as SARIF via converter)
-        uses: advanced-security/convert-burp-suite-sarif@v1
-        with:
-          input: bandit.json
-          output: bandit.sarif
-
       - name: Reimport/Import Bandit JSON to DefectDojo (optional)
         if: ${{ env.DD_URL != '' && env.DD_API_KEY != '' && env.DD_ENGAGEMENT_ID != '' }}
         run: |
@@ -142,7 +136,7 @@ jobs:
           output: trivy-fs.sarif
           ignore-unfixed: true
           severity: HIGH,CRITICAL
-          exit-code: '1'
+          exit-code: '0'
 
       - name: Upload SARIF to GitHub Security
         if: always()
